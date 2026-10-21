@@ -174,7 +174,9 @@ shuf).
   from `intRange(0, n)` they are biased (see above).
 - Messages quote with ASCII apostrophes (`'5-3'`), as in the C locale.
 - Natively, write errors on standard output (`> /dev/full`) are not
-  reported.
+  reported, so when SIGPIPE is ignored (as on some CI runners) `shuf -r |
+  head` keeps running after `head` exits; GNU shuf stops with a write
+  error.
 
 ## Layout
 

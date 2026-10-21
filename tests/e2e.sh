@@ -102,8 +102,19 @@ printf 'foobar' > "$TMP/bytes"
 report "same source, same order" 0 0 "$TMP/first" "$TMP/second"
 seq 1 50 > "$TMP/ordered"
 check_sorted "clock seed: a permutation" "$(LC_ALL=C sort "$TMP/ordered")"$'\n' -i 1-50
-"$BIN" -r -i 1-3 2> "$TMP/err" | head -1000 > "$TMP/endless"
-[ "$(wc -l < "$TMP/endless")" -eq 1000 ] && pass=$((pass + 1)) || { fail=$((fail + 1)); echo "FAIL: --repeat without -n"; }
+# --repeat without -n never stops. A pipe into `head` would rely on SIGPIPE,
+# which CI runners may ignore (and native writes ignore EPIPE), so stop it
+# with `timeout` instead and look at what it wrote to a file.
+timeout 1 "$BIN" -r -i 1-3 > "$TMP/endless" 2> "$TMP/err"
+status=$?
+lines=$(wc -l < "$TMP/endless")
+others=$(grep -cvx '[123]' "$TMP/endless")
+if [ "$status" -eq 124 ] && [ "$lines" -gt 1000 ] && [ "$others" -le 1 ]; then
+    pass=$((pass + 1))
+else
+    fail=$((fail + 1))
+    echo "FAIL: --repeat without -n (exit $status, $lines lines, $others others)"
+fi
 check "-n 0 reads nothing"     0 ''                          -n 0 "$TMP/missing"
 
 # --- output files --------------------------------------------------------------------

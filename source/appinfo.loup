@@ -1,13 +1,15 @@
 @mode(host.dual)
 
-# Application identity. Keep APP_NAME and APP_VERSION in step with `name`
-# and `version` in package.lppkg.
+# shuf's identity and exit statuses. Keep APP_NAME and APP_VERSION in step
+# with `name` and `version` in package.lppkg.
+#
+# Runtime: host.dual. Compiled into the native binary build/shuf by `make
+# build`; `loup run source/main.loup` interprets the same code.
 
-pub const APP_NAME: string = "myapp";
+pub const APP_NAME: string = "shuf";
 pub const APP_VERSION: string = "0.1.0";
-pub const APP_SUMMARY: string = "A command-line application written in Loup.";
+pub const APP_SUMMARY: string = "write a random permutation of the input lines";
 
-# Exit statuses returned by main().
+# GNU shuf exits 1 on every error, usage errors included.
 pub const EXIT_OK: int = 0;
 pub const EXIT_FAILURE: int = 1;
-pub const EXIT_USAGE: int = 2;

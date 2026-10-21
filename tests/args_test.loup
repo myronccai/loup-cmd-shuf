@@ -1,64 +1,109 @@
 @mode(host.dual)
 
+# Unit tests for shuf's command-line parser (cli/args.loup): option
+# spellings, prefixes, values, the smallest -n, and every usage error.
+#
+# Runtime: host.dual, run by the test runner: `make test` interprets this
+# file with `loup-bootstrap test --no-parallel` (LOUPPATH=source), one test
+# per `func test_*()`. It is not part of the binary.
+
 from debug.assert import (expect, expectEq);
-from cli.args import (parse_args, DEFAULT_GREETING);
+from cli.args import (Options, ArgError, parse_args, parse_count, parse_range, parse_number);
 
-func test_no_arguments(): void {
-    let none: list[string] = [];
-    let opts = parse_args(none).unwrap();
-    expectEq(opts.command, "", "no command");
-    expectEq(opts.operands.len(), 0, "no operands");
-    expectEq(opts.greeting, DEFAULT_GREETING, "default greeting");
-    expect(!opts.help and !opts.version and !opts.verbose and !opts.shout, "no flags set");
+func ok(argv: list[string]): Options {
+    match parse_args(argv) {
+        Ok(o) => { return o; },
+        Err(e) => {
+            expect(false, "unexpected error: " + e.message);
+            return Options();
+        },
+    }
 }
 
-func test_command_and_operands(): void {
-    let opts = parse_args(["hello", "Ann"]).unwrap();
-    expectEq(opts.command, "hello", "command");
-    expectEq(opts.operands.len(), 1, "one operand");
-    expectEq(opts.operands[0], "Ann", "operand");
+# The error as `message|try` (try = 1 when the Try line follows).
+func err(argv: list[string]): string {
+    match parse_args(argv) {
+        Ok(_) => { return "parsed"; },
+        Err(e) => { return e.message + "|" + (if (e.try_help) { "1" } else { "0" }); },
+    }
 }
 
-func test_flags_anywhere(): void {
-    let opts = parse_args(["-v", "hello", "--shout", "Ann"]).unwrap();
-    expect(opts.verbose, "verbose");
-    expect(opts.shout, "shout");
-    expectEq(opts.command, "hello", "command");
-    expectEq(opts.operands[0], "Ann", "operand");
+func test_defaults(): void {
+    let o = ok([]);
+    expect(!o.echo and !o.has_range and !o.repeat and !o.zero and !o.has_output and !o.has_seed, "flags off");
+    expectEq(o.head_count, -1, "no count");
+    expectEq(o.operands.len(), 0, "standard input");
 }
 
-func test_help_and_version(): void {
-    expect(parse_args(["--help"]).unwrap().help, "--help");
-    expect(parse_args(["-h"]).unwrap().help, "-h");
-    expect(parse_args(["--version"]).unwrap().version, "--version");
-    expect(parse_args(["-V"]).unwrap().version, "-V");
+func test_short_options(): void {
+    let o = ok(["-rzn3", "-o", "out.txt", "-e", "a", "b"]);
+    expect(o.repeat and o.zero and o.echo, "flags in a cluster");
+    expectEq(o.head_count, 3, "-n value attached");
+    expectEq(o.output, "out.txt", "-o value in the next word");
+    expectEq(o.operands.join(","), "a,b", "operands");
+    let r = ok(["-i", "5-9"]);
+    expect(r.has_range and r.range_lo == 5 and r.range_hi == 9, "-i");
 }
 
-func test_value_option_forms(): void {
-    expectEq(parse_args(["-g", "Hi"]).unwrap().greeting, "Hi", "-g VALUE");
-    expectEq(parse_args(["--greeting", "Hi"]).unwrap().greeting, "Hi", "--greeting VALUE");
-    expectEq(parse_args(["--greeting=a=b"]).unwrap().greeting, "a=b", "--greeting=VALUE keeps '='");
+func test_long_options_and_prefixes(): void {
+    let o = ok(["--echo", "--head-count=2", "--zero", "--rep", "--seed", "42"]);
+    expect(o.echo and o.zero and o.repeat, "flags");
+    expectEq(o.head_count, 2, "--head-count=");
+    expect(o.has_seed and o.seed == 42, "--seed");
+    let r = ok(["--input", "1-3", "--output=f"]);
+    expect(r.has_range and r.range_lo == 1 and r.range_hi == 3 and r.output == "f", "--input prefix, --output=");
+    expectEq(ok(["--random-source=/dev/zero"]).random_source, "/dev/zero", "--random-source");
+    expect(ok(["--help"]).help and ok(["--vers"]).version, "--help, --version");
 }
 
-func test_double_dash_ends_options(): void {
-    let opts = parse_args(["hello", "--", "--shout"]).unwrap();
-    expect(!opts.shout, "--shout after -- is an operand");
-    expectEq(opts.operands[0], "--shout", "operand");
+func test_operands_and_double_dash(): void {
+    expectEq(ok(["-e", "--", "-n", "x"]).operands.join(","), "-n,x", "-- ends the options");
+    expectEq(ok(["-"]).operands.join(","), "-", "- is standard input");
+    expectEq(ok(["-e", "a", "-n", "1", "b"]).operands.join(","), "a,b", "options between operands");
 }
 
-func test_lone_dash_is_operand(): void {
-    let opts = parse_args(["hello", "-"]).unwrap();
-    expectEq(opts.operands[0], "-", "operand");
+func test_smallest_count_wins(): void {
+    expectEq(ok(["-n", "5", "-n", "2", "-n", "9"]).head_count, 2, "GNU keeps the smallest");
+    expectEq(ok(["-n", "0"]).head_count, 0, "zero");
 }
 
-func test_unknown_option(): void {
-    expectEq(parse_args(["--nope"]).unwrap_err(), "unknown option '--nope'", "error message");
+func test_value_parsers(): void {
+    expectEq(parse_number("0042") ?? -1, 42, "digits");
+    expect(parse_number("") == None and parse_number("4x") == None and parse_number("-1") == None, "not numbers");
+    expectEq(parse_count("123456789012345678901234") ?? -1, 999999999999999999, "a huge count");
+    expect(parse_count("1e3") == None, "not a count");
+    match parse_range("10-20") {
+        Some((lo, hi)) => { expectEq(str(lo) + " " + str(hi), "10 20", "range"); },
+        None => { expect(false, "range"); },
+    }
+    expect(parse_range("5-4") != None, "an empty range is allowed");
+    expect(parse_range("5-3") == None and parse_range("3") == None and parse_range("-3") == None, "bad ranges");
+    expect(parse_range("a-b") == None and parse_range("1-") == None, "not numbers");
 }
 
-func test_missing_value(): void {
-    expectEq(parse_args(["-g"]).unwrap_err(), "option '-g' requires a value", "error message");
+func test_bad_values(): void {
+    expectEq(err(["-n", "x"]), "invalid line count: 'x'|0", "count");
+    expectEq(err(["-n", "-1"]), "invalid line count: '-1'|0", "negative count");
+    expectEq(err(["-i", "5-3"]), "invalid input range: '5-3'|0", "range");
+    expectEq(err(["-i", "1-3", "-i", "4-5"]), "multiple -i options specified|0", "two ranges");
+    expectEq(err(["-o", "a", "-o", "b"]), "multiple output files specified|0", "two outputs");
+    expectEq(err(["--random-source=a", "--seed=1"]), "multiple random sources specified|0", "two sources");
+    expectEq(err(["--seed", "soon"]), "invalid seed: 'soon'|0", "seed");
 }
 
-func test_flag_with_value(): void {
-    expectEq(parse_args(["--shout=1"]).unwrap_err(), "option '--shout' does not take a value", "error message");
+func test_getopt_errors(): void {
+    expectEq(err(["-x"]), "invalid option -- 'x'|1", "short");
+    expectEq(err(["--bogus"]), "unrecognized option '--bogus'|1", "long");
+    expectEq(err(["--r"]), "option '--r' is ambiguous; possibilities: '--random-source' '--repeat'|1", "ambiguous");
+    expectEq(err(["--h"]), "option '--h' is ambiguous; possibilities: '--head-count' '--help'|1", "ambiguous too");
+    expectEq(err(["-n"]), "option requires an argument -- 'n'|1", "missing short value");
+    expectEq(err(["--output"]), "option '--output' requires an argument|1", "missing long value");
+    expectEq(err(["--echo=x"]), "option '--echo' doesn't allow an argument|1", "flag with a value");
+}
+
+func test_option_conflicts(): void {
+    expectEq(err(["-e", "-i", "1-3"]), "cannot combine -e and -i options|1", "-e and -i");
+    expectEq(err(["-i", "1-3", "x"]), "extra operand 'x'|1", "operand with -i");
+    expectEq(err(["a", "b"]), "extra operand 'b'|1", "two files");
+    expect(ok(["--help", "a", "b"]).help, "--help wins over operand errors");
 }

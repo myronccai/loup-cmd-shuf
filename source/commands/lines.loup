@@ -1,0 +1,62 @@
+@mode(host.dual)
+
+# shuf's input lines: reading a file or standard input, cutting it at the
+# line delimiter, and listing small -i ranges.
+#
+# Runtime: host.dual. Compiled into the native binary build/shuf by `make
+# build`; `loup run source/main.loup` interprets the same code. Natively a
+# read failure ends the program and cannot be caught, so read_input checks
+# the path first.
+
+from io.fs import (isDir);
+from system.collections import (rangeFrom);
+
+# A -i range is listed (and shuffled like input lines) up to this many
+# numbers. rangeFrom builds its list by concatenation, so its cost grows
+# with the square of the length; larger ranges are never listed and come
+# from a sparse permutation instead.
+pub const LISTED_RANGE: int = 4096;
+
+pub func delimiter(zero: bool): string {
+    return if (zero) { str(char.of(0)) } else { "\n" };
+}
+
+# The lines of `text`: the pieces between delimiters. A final delimiter
+# does not start an empty line; a last line without one is still a line.
+pub func split_lines(text: string, delim: string): list[string] {
+    var lines: list[string] = [];
+    if (text.len() == 0) {
+        return lines;
+    }
+    let pieces = text.split(delim);
+    let last = pieces.len() - 1;
+    for (k in 0..pieces.len()) {
+        if (k < last or pieces[k].len() > 0) {
+            lines.push(pieces[k]);
+        }
+    }
+    return lines;
+}
+
+# The text of the FILE operand ("-" for standard input), or GNU's message.
+pub func read_input(path: string): Result[string, string] {
+    if (path == "-") {
+        return Ok(readText("/dev/stdin"));
+    }
+    if (!exists(path)) {
+        return Err(i"{$ path $}: No such file or directory");
+    }
+    if (isDir(path)) {
+        return Err("read error: Is a directory");
+    }
+    return Ok(readText(path));
+}
+
+# The numbers LO through HI as lines (a range of at most LISTED_RANGE).
+pub func range_lines(lo: int, hi: int): list[string] {
+    var lines: list[string] = [];
+    for (n in rangeFrom(lo, hi + 1)) {
+        lines.push(str(n));
+    }
+    return lines;
+}

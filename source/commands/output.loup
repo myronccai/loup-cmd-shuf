@@ -1,0 +1,68 @@
+@mode(host.dual)
+
+# Where shuf's lines go: standard output, or the -o file. Lines are
+# gathered and written in blocks, which keeps native output fast without
+# holding an endless --repeat stream in memory.
+#
+# Runtime: host.dual. Compiled into the native binary build/shuf by `make
+# build`; `loup run source/main.loup` interprets the same code. Natively a
+# failed write ends the program, so check_output looks at the path first.
+
+from io.fs import (isDir, appendText);
+from io.path import (dirname);
+
+# Lines per block.
+const BLOCK: int = 4096;
+
+# Checks that an -o FILE can be written. Returns "" or GNU's message.
+pub func check_output(path: string): string {
+    if (isDir(path)) {
+        return i"{$ path $}: Is a directory";
+    }
+    let parent = dirname(path);
+    if (parent != "" and !isDir(parent)) {
+        return i"{$ path $}: No such file or directory";
+    }
+    return "";
+}
+
+pub class Output {
+    let path: string;
+    let to_file: bool;
+    let delim: string;
+    var block: list[string] = [];
+    var started: bool = false;
+
+    # `path` "" means standard output.
+    new(path: string, delim: string) {
+        this.path = path;
+        this.to_file = path != "";
+        this.delim = delim;
+    }
+
+    pub modifier func line(text: string): void {
+        this.block.push(text);
+        this.block.push(this.delim);
+        if (this.block.len() >= 2 * BLOCK) {
+            this.flush();
+        }
+    }
+
+    # Writes the block. The first write to a file creates or empties it.
+    pub modifier func flush(): void {
+        let text = this.block.join("");
+        if (!this.to_file) {
+            print(text);
+        } else if (this.started) {
+            appendText(this.path, text);
+        } else {
+            writeText(this.path, text);
+        }
+        this.started = true;
+        # Emptied in place: a fresh list per block would never be freed
+        # natively.
+        while (this.block.len() > 0) {
+            this.block.pop();
+        }
+    }
+}

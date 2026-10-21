@@ -1,0 +1,56 @@
+@mode(host.dual)
+
+# Where shuf's seed comes from: --seed (this program's extension), the
+# bytes of a --random-source file, or the clock.
+#
+# Runtime: host.dual. Compiled into the native binary build/shuf by `make
+# build`; `loup run source/main.loup` interprets the same code. A random
+# source is read with `head -c` through `exec`: `readBytes` would read
+# /dev/urandom forever.
+
+from io.fs import (isDir);
+from system.time import (realtimeNs);
+
+# How many bytes of a random source make the seed.
+const SOURCE_BYTES: int = 64;
+
+# The default seed: the wall clock in nanoseconds, different for every run.
+pub func clock_seed(): int {
+    return realtimeNs();
+}
+
+# 64-bit FNV-1a over the bytes: every byte changes the seed, and the same
+# bytes always give the same seed. `int` arithmetic wraps on overflow.
+pub func seed_from_bytes(data: list[int]): int {
+    var hash = -3750763034362895579;
+    for (b in data) {
+        hash = (hash ^ b) * 1099511628211;
+    }
+    return hash;
+}
+
+# Checks a --random-source before any input is read, as GNU shuf opens it at
+# once. Returns "" or the error message.
+pub func check_random_source(path: string): string {
+    if (!exists(path)) {
+        return i"{$ path $}: No such file or directory";
+    }
+    return "";
+}
+
+# The seed from the first bytes of a --random-source file.
+pub func random_source_seed(path: string): Result[int, string] {
+    if (isDir(path)) {
+        return Err(i"{$ path $}: read error: Is a directory");
+    }
+    let r = exec(["head", "-c", str(SOURCE_BYTES), "--", path]);
+    # Natively the fields of exec's result are read where exec was called.
+    var data: list[int] = [];
+    for (k in 0..r.stdout.len()) {
+        data.push(r.stdout[k]);
+    }
+    if (r.exit_code != 0 or data.len() == 0) {
+        return Err(i"'{$ path $}': end of file");
+    }
+    return Ok(seed_from_bytes(data));
+}

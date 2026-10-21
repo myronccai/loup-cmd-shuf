@@ -1,0 +1,136 @@
+@mode(host.dual)
+
+# Unit tests for shuf's randomness (commands/sampler.loup): seed mixing,
+# draws below n, whole and sparse permutations, and picks. Seeds are fixed,
+# so every expected value is exact; the uniformity checks count over many
+# seeds.
+#
+# Runtime: host.dual, run by the test runner: `make test` interprets this
+# file with `loup-bootstrap test --no-parallel` (LOUPPATH=source), one test
+# per `func test_*()`. It is not part of the binary.
+
+from debug.assert import (expect, expectEq);
+from system.collections import (rangeFrom);
+from commands.sampler import (Sampler, SparsePermutation, mix_seed);
+
+func sorted_ints(xs: list[int]): string {
+    var copy: list[int] = [];
+    for (x in xs) {
+        copy.push(x);
+    }
+    copy.sort(func(a: int, b: int): int { return a - b; });
+    let parts: list[string] = [str(x) for x in copy];
+    return parts.join(",");
+}
+
+func test_mix_seed_matches_splitmix64(): void {
+    expectEq(mix_seed(0), -2152535657050944081, "SplitMix64 of 0 (0xE220A8397B1DCDAF)");
+    expectEq(mix_seed(1), -7995527694508729151, "of 1");
+}
+
+func test_same_seed_same_draws(): void {
+    let a = Sampler(7);
+    let b = Sampler(7);
+    var left: list[string] = [];
+    var right: list[string] = [];
+    safe {
+        for (k in 0..20) {
+            left.push(str(a.below(1000)));
+            right.push(str(b.below(1000)));
+        }
+    }
+    expectEq(left.join(" "), right.join(" "), "reproducible");
+}
+
+func test_below_stays_in_range_and_spreads(): void {
+    let s = Sampler(1);
+    var counts: list[int] = [0, 0, 0];
+    var big_ok = true;
+    safe {
+        for (k in 0..3000) {
+            let v = s.below(3);
+            counts[v] = counts[v] + 1;
+            let w = s.below(5000000000);
+            big_ok = big_ok and w >= 0 and w < 5000000000;
+        }
+    }
+    for (c in counts) {
+        expect(c > 900 and c < 1100, "about a third each: " + str(counts));
+    }
+    expect(big_ok, "large bounds use intRange directly");
+}
+
+# The weakness of the generator's low bits: draws below 2 alternate when
+# taken straight from intRange; below() must not.
+func test_two_way_draws_do_not_alternate(): void {
+    let s = Sampler(3);
+    var changes = 0;
+    var previous = -1;
+    safe {
+        for (k in 0..200) {
+            let v = s.below(2);
+            if (v != previous) {
+                changes += 1;
+            }
+            previous = v;
+        }
+    }
+    expect(changes > 60 and changes < 140, "about half the draws change: " + str(changes));
+}
+
+func test_shuffled_is_a_permutation(): void {
+    let lines: list[string] = [str(n) for n in rangeFrom(1, 51)];
+    var mixed: list[string] = [];
+    safe {
+        mixed = Sampler(11).shuffled(lines);
+    }
+    let numbers: list[int] = [m.toInt() for m in mixed];
+    expectEq(sorted_ints(numbers), lines.join(","), "every line once");
+    expect(mixed.join(",") != lines.join(","), "not the input order");
+    expectEq(lines[0], "1", "the input is left alone");
+}
+
+# All 24 orders of four lines come out over many seeds (core.random's own
+# shuffle reaches only 12 of them).
+func test_every_order_is_reachable(): void {
+    var seen: dict[string, int] = {};
+    for (seed in rangeFrom(0, 1200)) {
+        var order: list[string] = [];
+        safe {
+            order = Sampler(seed).shuffled(["a", "b", "c", "d"]);
+        }
+        let key = order.join("");
+        seen[key] = (seen.get(key) ?? 0) + 1;
+    }
+    expectEq(seen.len(), 24, "all orders");
+    for (key in seen.keys()) {
+        expect(seen[key] > 25 and seen[key] < 75, key + " about 50 times: " + str(seen[key]));
+    }
+}
+
+func test_sparse_permutation(): void {
+    let s = Sampler(5);
+    let perm = SparsePermutation(1000);
+    var drawn: list[int] = [];
+    safe {
+        while (perm.remaining() > 0) {
+            drawn.push(perm.next(edits: s));
+        }
+    }
+    let expected: list[string] = [str(n) for n in rangeFrom(0, 1000)];
+    expectEq(sorted_ints(drawn), expected.join(","), "every position once");
+    expect(drawn[0] != 0 or drawn[1] != 1, "shuffled");
+}
+
+func test_pick_returns_members(): void {
+    let s = Sampler(9);
+    let lines = ["x", "y", "z"];
+    var seen: dict[string, int] = {};
+    safe {
+        for (k in 0..300) {
+            let line = s.pick(lines);
+            seen[line] = (seen.get(line) ?? 0) + 1;
+        }
+    }
+    expectEq(seen.len(), 3, "each line comes up");
+}

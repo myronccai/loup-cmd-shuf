@@ -1,0 +1,118 @@
+@mode(host.dual)
+
+# shuf's randomness: a seeded core.random generator and the three ways shuf
+# draws from it: a whole permutation, a sparse permutation that never lists
+# its numbers, and independent picks for --repeat.
+#
+# Runtime: host.dual. Compiled into the native binary build/shuf by `make
+# build`; `loup run source/main.loup` interprets the same code. The same
+# seed gives the same draws in every lane, so `--seed N` output is
+# reproducible (the tests rely on it).
+#
+# Why not core.random's own shuffle and choice: Random is a 64-bit linear
+# congruential generator, and intRange(lo, hi) returns its next output
+# modulo (hi - lo). The low bits of such a generator repeat with short
+# periods (bit 0 alternates), so a draw below a small n is far from random:
+# choice between two lines alternates, and shuffle, which draws below 2, 3,
+# 4 ..., never produces half of the 24 orders of four lines. below() asks
+# intRange for a number below n * 2^32 instead and keeps its upper part,
+# which comes from the generator's good high bits.
+
+from core.random import (Random);
+
+# Up to this n, below() can scale the range by 2^32 without overflow.
+const SCALABLE: int = 2147483648;
+
+# `value >> by` with zeros shifted in (`>>` keeps the sign bit).
+func shift_right(value: int, by: int): int {
+    return (value >> by) & ((1 << (64 - by)) - 1);
+}
+
+# SplitMix64's finalizer: every bit of the seed reaches every bit of the
+# result, so seeds 1, 2, 3 (or clock readings a few nanoseconds apart)
+# start the generator in unrelated states. The constants are the usual
+# 64-bit ones written as signed numbers; the multiplications wrap.
+pub func mix_seed(seed: int): int {
+    var z = seed + -7046029254386353131;
+    z = (z ^ shift_right(z, 30)) * -4658895280553007687;
+    z = (z ^ shift_right(z, 27)) * -7723592293110705685;
+    return z ^ shift_right(z, 31);
+}
+
+pub class Sampler {
+    var rng: Random;
+
+    new(seed: int) {
+        this.rng = Random(mix_seed(seed));
+    }
+
+    # A whole number in [0, n), for n of at least 1, every value equally
+    # likely.
+    pub modifier func below(n: int): int {
+        var k = 0;
+        safe {
+            k = if (n < SCALABLE) { this.rng.intRange(0, n << 32) >> 32 } else { this.rng.intRange(0, n) };
+        }
+        return k;
+    }
+
+    # Every line, in random order: Fisher-Yates, back to front, each place
+    # taking one of the lines not yet placed.
+    pub modifier func shuffled(lines: list[string]): list[string] {
+        var out: list[string] = [];
+        for (line in lines) {
+            out.push(line);
+        }
+        var i = out.len() - 1;
+        while (i > 0) {
+            let j = this.below(i + 1);
+            let held = out[i];
+            out[i] = out[j];
+            out[j] = held;
+            i -= 1;
+        }
+        return out;
+    }
+
+    # One of `lines`, any of them, every time (--repeat).
+    pub modifier func pick(lines: list[string]): string {
+        return lines[this.below(lines.len())];
+    }
+}
+
+# The positions 0 .. size-1 in random order, one at a time, for ranges too
+# large to list: Fisher-Yates over a virtual array in which only the
+# entries that have moved are stored. Drawing k positions costs k steps and
+# at most 2k entries, whatever the size (GNU shuf does the same for large
+# -i ranges).
+pub class SparsePermutation {
+    let size: int;
+    var drawn: int = 0;
+    var moved: dict[int, int] = {};
+
+    new(size: int) {
+        this.size = size;
+    }
+
+    pub func remaining(): int {
+        return this.size - this.drawn;
+    }
+
+    # The value at virtual position `at`: moved there, or `at` itself.
+    func value_at(at: int): int {
+        return if (this.moved.containsKey(at)) { this.moved[at] } else { at };
+    }
+
+    # The next position: swap a random entry of the unseen tail into place.
+    pub modifier func next(edits sampler: Sampler): int {
+        var offset = 0;
+        safe {
+            offset = sampler.below(this.size - this.drawn);
+        }
+        let j = this.drawn + offset;
+        let chosen = this.value_at(j);
+        this.moved[j] = this.value_at(this.drawn);
+        this.drawn += 1;
+        return chosen;
+    }
+}

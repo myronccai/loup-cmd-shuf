@@ -1,24 +1,26 @@
-# template Loup commandline application
+# loup-cmd-shuf
 
-A GitHub template for a command-line application written in
-[Loup](https://code-craft.ai/references/loup). It includes argument parsing,
-command dispatch, a sample `hello` command, tests, a native build and a CI
-workflow.
+GNU `shuf` recreated in [Loup](https://code-craft.ai/references/loup): write a
+random permutation of the input lines, the `-e` arguments or an `-i LO-HI`
+range of numbers, with `-n`, `-r`, `-z`, `-o` and `--random-source`, plus a
+`--seed` option that makes the output reproducible.
 
-After creating a repository from this template, work through
-[REPOSITORY_TODOS.md](REPOSITORY_TODOS.md).
+Part of the **loup-cmd** series of example applications: classic Linux and
+Windows commands, and projects for each Loup execution mode, each in its own
+repository under [myronccai](https://github.com/myronccai?tab=repositories&q=loup-cmd).
+This one is `host.dual` Loup built as a native binary. It is the series'
+example of `core.random`, `system.collections.rangeFrom` and `system.time`.
 
 ## Requirements
 
 - [Loup Lite](https://github.com/code-craft-ai-company/loup-releases) 1.26.0
   or later; see [Installing Loup Lite](#installing-loup-lite).
-- `make`
-- `clang` 17 or later for native builds. Native builds are supported on Linux
-  x86-64 and arm64, and are a preview on macOS and Windows.
+- `make`, and `clang` 17 or later for the native build.
+- `head` (coreutils) for `--random-source`.
 
 ## Installing Loup Lite
 
-This project is built and tested with **Loup Lite**, the free public build of
+This example is built and tested with **Loup Lite**, the free public build of
 the Loup toolchain from [Code Craft AI](https://code-craft.ai), meant for
 education and training. Code Craft AI publishes the official builds,
 installers and signed checksums at
@@ -61,70 +63,139 @@ check it against `SHA256SUMS`, unpack it anywhere and add its `bin` directory to
 explains how to verify the Sigstore signature on `SHA256SUMS`.
 
 Loup Lite leaves out Loup's cryptography library and the full set of Loup
-packages; this project needs neither. Commercial use of Loup needs a
+packages; this example needs neither. Commercial use of Loup needs a
 license: <https://code-craft.ai/loup/license>.
 
 ## Usage
 
 ```sh
-make run ARGS="--help"            # run from source
-make run ARGS="hello Ann --shout"
-make check                        # type-check the program
-make test                         # run the tests in tests/
-make build                        # native binary: build/myapp
-make ci                           # check, test, build and smoke-test the binary
-make clean
+make build                 # native binary: build/shuf
+make run ARGS="--seed 7 -e red green blue"   # loup run source/main.loup -- ARGS
+make ci                    # check, unit tests, build, end-to-end tests
 ```
 
 ```text
-$ build/myapp --help
-usage: myapp [OPTIONS] COMMAND [ARGS...]
-
-A command-line application written in Loup.
-
-Commands:
-  hello [NAME]          Print a greeting (NAME defaults to 'world')
-  help                  Show this help
-
-Options:
-  -g, --greeting TEXT   Greeting used by 'hello' (default: Hello)
-      --shout           Print the greeting in upper case
-  -v, --verbose         Print diagnostic messages to stderr
-  -h, --help            Show this help and exit
-  -V, --version         Show the version and exit
+$ cat names.txt
+alice
+bob
+carol
+dave
+$ build/shuf --seed 42 names.txt
+carol
+dave
+bob
+alice
+$ build/shuf --seed 42 -n 2 names.txt
+carol
+dave
+$ build/shuf --seed 7 -e red green blue
+blue
+green
+red
+$ build/shuf --seed 3 -i 1-10 | tr '\n' ' '
+9 8 4 5 7 10 6 3 2 1
+$ build/shuf --seed 3 -i 1-1000000000 -n 3
+956379221
+866927163
+90539297
+$ build/shuf --seed 2 -r -n 6 -e heads tails | tr '\n' ' '
+tails heads tails tails heads heads
+$ build/shuf --seed 5 -r -n 1000 -e heads tails | sort | uniq -c
+    484 heads
+    516 tails
+$ seq 5 | build/shuf --random-source=names.txt | tr '\n' ' '
+3 5 1 4 2
+$ time build/shuf -i 1-1000000 > /dev/null
+real	0m0.337s
+$ build/shuf --seed 1 -o names.txt names.txt && cat names.txt
+alice
+bob
+dave
+carol
+$ build/shuf -e -i 1-3
+shuf: cannot combine -e and -i options
+Try 'shuf --help' for more information.
 ```
 
-Exit status: `0` success, `1` runtime failure, `2` usage error.
+Without `--seed` or `--random-source` every run differs: the clock seeds
+the generator.
+
+### Options
+
+| Option | Meaning |
+|---|---|
+| `-e`, `--echo` | treat each operand as an input line |
+| `-i`, `--input-range=LO-HI` | the numbers LO through HI are the input lines (`5-4` is empty) |
+| `-n`, `--head-count=COUNT` | write at most COUNT lines (the smallest of several `-n`; `-n 0` reads nothing) |
+| `-o`, `--output=FILE` | write to FILE, after all input is read (FILE may be the input) |
+| `--random-source=FILE` | seed from the first 64 bytes of FILE: the same file gives the same order |
+| `-r`, `--repeat` | draw every output line from all the input lines; without `-n`, never stop |
+| `-z`, `--zero-terminated` | lines end with NUL, not newline, on input and output |
+| `--seed=NUMBER` | seed the generator with NUMBER (an extension: not in GNU shuf) |
+| `--help` / `--version` | help text / `shuf (loup-cmd-shuf) 0.1.0` |
+
+With no FILE, or when FILE is `-`, shuf reads standard input. Options may
+come anywhere, short ones combine (`-rn5`), and long ones may be shortened
+to any unambiguous prefix (`--head=2`). `--seed` and `--random-source`
+exclude each other.
+
+Exit status: `0` success, `1` any error (usage errors included, as in GNU
+shuf).
+
+## How it works
+
+- **`core.random`**: a `Random(seed)` generator. `Random` is a 64-bit
+  linear congruential generator, and `intRange(lo, hi)` returns its next
+  output modulo `hi - lo`, which for small ranges uses its low bits: those
+  repeat with short periods (bit 0 simply alternates). shuf therefore asks
+  `intRange` for a number below `n * 2^32` and keeps the upper part, and
+  scrambles the seed first with SplitMix64's finalizer so that seeds 1, 2,
+  3 give unrelated orders. Every one of the 24 orders of four lines comes
+  out about equally often (a unit test counts them over 1,200 seeds).
+- **Large ranges are never listed.** `-i 1-1000000000 -n 3` draws three
+  numbers from a sparse Fisher-Yates permutation that stores only the
+  entries it has moved. Ranges of up to 4,096 numbers are listed with
+  `system.collections.rangeFrom` and shuffled like lines.
+- **Seeds**: `system.time.realtimeNs()` for the default; FNV-1a over the
+  bytes `head -c 64` reads from a `--random-source` (reading the whole file
+  would never end for `/dev/urandom`).
+- The same seed gives the same output natively, under `loup run` and under
+  Stage0, so the tests state exact expected output.
+
+## Differences from GNU shuf
+
+- The random orders differ from GNU's for the same `--random-source`:
+  GNU reads its random numbers from the file as it goes, this shuf seeds
+  its generator from the file's first 64 bytes. An empty random source is
+  an error only when a random choice is needed, as in GNU; one shorter than
+  GNU would need is fine.
+- `--seed` is an extension. The generator is not cryptographic.
+- core.random's own `shuffle` and `choice` are not used: drawing straight
+  from `intRange(0, n)` they are biased (see above).
+- Messages quote with ASCII apostrophes (`'5-3'`), as in the C locale.
+- Natively, write errors on standard output (`> /dev/full`) are not
+  reported.
 
 ## Layout
 
 ```text
-package.lppkg            # Loup manifest
-Makefile                 # run, check, test, build, ci, clean
-LICENSE                  # MIT license
-source/                  # the application's Loup code
-├── main.loup            # entry point
-├── cli/                 # argument parsing, help text, command dispatch
-└── commands/            # one module per command
-tests/                   # *_test.loup files
-specs/                   # feature specs: requirements, design, tasks
-skills/loup-programmer/  # agent skill for writing Loup
+source/main.loup              # entry point
+source/appinfo.loup           # name, version, exit statuses
+source/cli/args.loup          # GNU getopt-style option parsing
+source/cli/usage.loup         # --help and --version text
+source/cli/app.loup           # run(): parse, report, exit status
+source/commands/shuf.loup     # run_shuf() and the selections
+source/commands/sampler.loup  # Sampler (core.random), SparsePermutation, mix_seed
+source/commands/seed.loup     # --seed, --random-source, clock seeds
+source/commands/lines.loup    # input lines and listed ranges (rangeFrom)
+source/commands/output.loup   # standard output or the -o file, in blocks
+tests/*_test.loup             # unit tests (make test)
+tests/e2e.sh                  # end-to-end tests of build/shuf (make e2e)
+specs/shuf/                   # requirements, design, tasks
 ```
 
-[AGENTS.md](AGENTS.md) has the full layout, every build and test command, and
-the steps for adding a command.
-
-## Notes on the toolchain
-
-- On Linux x86-64, `loup` is the self-hosted driver and `loup-bootstrap` is
-  Stage0. `check` and `test` use `loup-bootstrap`; on other platforms both
-  names run the same tool. The Makefile handles this.
-- Modules import each other by their path under `source/`
-  (`from cli.args import (Options);`). Tests import them the same way, which
-  is why `make test` puts `source/` on `LOUPPATH`.
-- The Wasm build (`loup-bootstrap build`) is experimental: modules that use
-  `i"..."` interpolation build but trap at run time, so this template builds
-  native binaries.
+[AGENTS.md](AGENTS.md) has every build and test command and the conventions
+for changing the code.
 
 ## License
 

@@ -1,0 +1,105 @@
+@mode(host.dual)
+
+# Unit tests for shuf's command (commands/shuf.loup, commands/output.loup
+# and cli/app.loup): selections, repeated picks, -o files and the exit
+# statuses of whole command lines.
+#
+# Runtime: host.dual, run by the test runner: `make test` interprets this
+# file with `loup-bootstrap test --no-parallel` (LOUPPATH=source), one test
+# per `func test_*()`. The run() tests print shuf's usual messages and
+# write their -o files under build/tmp/. It is not part of the binary.
+
+from debug.assert import (expect, expectEq);
+from io.fs import (writeText);
+from cli.app import (run);
+from commands.sampler import (Sampler);
+from commands.shuf import (select_lines, select_numbers, repeat_pick);
+from commands.output import (check_output);
+
+func sorted_text(lines: list[string]): string {
+    var copy: list[string] = [];
+    for (line in lines) {
+        copy.push(line);
+    }
+    copy.sort(func(a: string, b: string): int { return a.compareTo(b); });
+    return copy.join(",");
+}
+
+func test_select_lines(): void {
+    let lines = ["a", "b", "c", "d", "e"];
+    var all: list[string] = [];
+    var two: list[string] = [];
+    safe {
+        all = select_lines(lines, -1, edits: Sampler(1));
+        two = select_lines(lines, 2, edits: Sampler(1));
+    }
+    expectEq(sorted_text(all), "a,b,c,d,e", "a permutation");
+    expectEq(two.join(","), all.slice(0, 2).join(","), "-n takes the first lines of the same permutation");
+    var one: list[string] = [];
+    safe {
+        one = select_lines(["only"], 5, edits: Sampler(1));
+    }
+    expectEq(one.join(","), "only", "a single line needs no randomness");
+}
+
+func test_select_numbers(): void {
+    var picked: list[string] = [];
+    var whole: list[string] = [];
+    safe {
+        picked = select_numbers(1000000, 1999999, 5, edits: Sampler(2));
+        whole = select_numbers(10, 14, -1, edits: Sampler(2));
+    }
+    expectEq(picked.len(), 5, "five numbers");
+    for (p in picked) {
+        expect(p.toInt() >= 1000000 and p.toInt() <= 1999999, "in range: " + p);
+    }
+    expectEq(sorted_text(picked).split(",").len(), 5, "distinct");
+    expectEq(sorted_text(whole), "10,11,12,13,14", "the whole range");
+}
+
+func test_repeat_pick(): void {
+    let s = Sampler(4);
+    var lines_seen: dict[string, int] = {};
+    var numbers_ok = true;
+    safe {
+        for (k in 0..100) {
+            lines_seen[repeat_pick(edits: s, ["p", "q"], 0, 0)] = 1;
+            let n = repeat_pick(edits: s, [], 7, 3).toInt();
+            numbers_ok = numbers_ok and n >= 7 and n <= 9;
+        }
+    }
+    expectEq(lines_seen.len(), 2, "both lines");
+    expect(numbers_ok, "numbers of the range 7..9");
+}
+
+func test_output_checks(): void {
+    expectEq(check_output("build"), "build: Is a directory", "a directory");
+    expectEq(check_output("build/none/x"), "build/none/x: No such file or directory", "missing parent");
+    expectEq(check_output("build/tmp/out.txt"), "", "writable");
+}
+
+func test_run_writes_the_output_file(): void {
+    expectEq(run(["--seed", "3", "-i", "1-20", "-o", "build/tmp/out.txt"]), 0, "status");
+    let lines = readText("build/tmp/out.txt").split("\n");
+    expectEq(lines.len(), 21, "twenty lines and the final newline");
+    let numbers: list[string] = [lines[k] for k in 0..20];
+    expectEq(sorted_text(numbers), "1,10,11,12,13,14,15,16,17,18,19,2,20,3,4,5,6,7,8,9", "each number once");
+    expectEq(run(["-n", "0", "-e", "a", "-o", "build/tmp/empty.txt"]), 0, "-n 0");
+    expectEq(readText("build/tmp/empty.txt"), "", "an empty file is made");
+}
+
+func test_run_reads_a_file(): void {
+    writeText("build/tmp/words.txt", "one\ntwo\nthree");
+    expectEq(run(["--seed", "8", "-n", "2", "-o", "build/tmp/two.txt", "build/tmp/words.txt"]), 0, "status");
+    let got = readText("build/tmp/two.txt").split("\n");
+    expect(got.len() == 3 and got[2] == "" and got[0] != got[1], "two different lines");
+}
+
+func test_run_statuses(): void {
+    expectEq(run(["--version"]), 0, "--version");
+    expectEq(run(["--bogus"]), 1, "usage error");
+    expectEq(run(["build/tmp/missing.txt"]), 1, "missing file");
+    expectEq(run(["-r", "-i", "5-4"]), 1, "no lines to repeat");
+    expectEq(run(["-e", "a", "-o", "build"]), 1, "output is a directory");
+    expectEq(run(["--random-source=build/tmp/none", "-e", "a", "b"]), 1, "missing random source");
+}

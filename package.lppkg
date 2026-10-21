@@ -1,4 +1,4 @@
-name = "myapp"
+name = "shuf"
 version = "0.1.0"
 loup = "1.26.0"
 authors = []
@@ -12,5 +12,5 @@ profile = "release"
 
 [test]
 pattern = "**/*_test.loup"
-parallel = true
+parallel = false
 timeout = 30

@@ -1,0 +1,158 @@
+@mode(host.dual)
+
+# shuf's command: choose the seed, read the input lines (or the -i range),
+# and write a random selection of them.
+#
+# Runtime: host.dual. Compiled into the native binary build/shuf by `make
+# build`; `loup run source/main.loup` interprets the same code. run_shuf is
+# the only function here that reads files or prints; the selections are
+# pure functions of their input and a Sampler, for the unit tests.
+#
+# Structure: the selections (whole lines, sparse numbers, repeated picks),
+# make_sampler, then run_shuf, which checks the paths, returns early for
+# -n 0, gathers the input, and writes either a finite selection or, for
+# --repeat, picks until the count runs out (forever without -n).
+
+from appinfo import (APP_NAME, EXIT_OK, EXIT_FAILURE);
+from cli.args import (Options);
+from commands.lines import (LISTED_RANGE, delimiter, split_lines, read_input, range_lines);
+from commands.output import (Output, check_output);
+from commands.sampler import (Sampler, SparsePermutation);
+from commands.seed import (clock_seed, check_random_source, random_source_seed);
+
+# How many lines a count lets through: all for -1 (no -n).
+func take(count: int, available: int): int {
+    return match count {
+        0 => 0,
+        n if (n < 0 or n > available) => available,
+        _ => count,
+    };
+}
+
+# The first `count` lines of a random permutation of `lines`.
+pub func select_lines(lines: list[string], count: int, edits sampler: Sampler): list[string] {
+    if (lines.len() < 2) {
+        return lines;
+    }
+    var order: list[string] = [];
+    safe {
+        order = sampler.shuffled(lines);
+    }
+    var chosen: list[string] = [];
+    for (var k = 0; k < take(count, order.len()); k += 1) {
+        chosen.push(order[k]);
+    }
+    return chosen;
+}
+
+# The first `count` numbers of a random permutation of LO..HI, drawn
+# without listing the range.
+pub func select_numbers(lo: int, hi: int, count: int, edits sampler: Sampler): list[string] {
+    let perm = SparsePermutation(hi - lo + 1);
+    var chosen: list[string] = [];
+    var left = take(count, perm.remaining());
+    while (left > 0) {
+        safe {
+            chosen.push(str(lo + perm.next(edits: sampler)));
+        }
+        left -= 1;
+    }
+    return chosen;
+}
+
+# One line for --repeat: one of `lines`, or, when `size` is not 0, a number
+# of the range of that size starting at `lo`.
+pub func repeat_pick(edits sampler: Sampler, lines: list[string], lo: int, size: int): string {
+    var line = "";
+    safe {
+        line = if (size > 0) { str(lo + sampler.below(size)) } else { sampler.pick(lines) };
+    }
+    return line;
+}
+
+# A generator seeded from --seed, the --random-source bytes or the clock.
+pub func make_sampler(opts: Options): Result[Sampler, string] {
+    if (opts.has_seed) {
+        return Ok(Sampler(opts.seed));
+    }
+    if (opts.random_source == "") {
+        return Ok(Sampler(clock_seed()));
+    }
+    match random_source_seed(opts.random_source) {
+        Ok(seed) => { return Ok(Sampler(seed)); },
+        Err(message) => { return Err(message); },
+    }
+}
+
+func fail(message: string): int {
+    printErr(APP_NAME + ": " + message);
+    return EXIT_FAILURE;
+}
+
+pub func run_shuf(opts: Options): int {
+    let source_problem = if (opts.random_source == "") { "" } else { check_random_source(opts.random_source) };
+    let output_problem = if (opts.has_output) { check_output(opts.output) } else { "" };
+    if (source_problem != "" or output_problem != "") {
+        return fail(if (source_problem != "") { source_problem } else { output_problem });
+    }
+    var out = Output(opts.output, delimiter(opts.zero));
+    # -n 0 asks for nothing: no input is read (an -o file is still made).
+    if (opts.head_count == 0) {
+        safe {
+            out.flush();
+        }
+        return EXIT_OK;
+    }
+
+    # The input: -e operands, an -i range (listed when small), or a file.
+    var lines: list[string] = [];
+    var range_size = 0;
+    if (opts.echo) {
+        lines = opts.operands;
+    } else if (opts.has_range and opts.range_hi - opts.range_lo + 1 <= LISTED_RANGE) {
+        lines = range_lines(opts.range_lo, opts.range_hi);
+    } else if (opts.has_range) {
+        range_size = opts.range_hi - opts.range_lo + 1;
+    } else {
+        let path = if (opts.operands.len() > 0) { opts.operands[0] } else { "-" };
+        match read_input(path) {
+            Ok(text) => { lines = split_lines(text, delimiter(opts.zero)); },
+            Err(message) => { return fail(message); },
+        }
+    }
+    let size = if (range_size > 0) { range_size } else { lines.len() };
+    if (opts.repeat and size == 0) {
+        return fail("no lines to repeat");
+    }
+
+    # The random source is read only when there is a choice to make.
+    var sampler = Sampler(0);
+    if (size > 1) {
+        match make_sampler(opts) {
+            Ok(s) => { sampler = s; },
+            Err(message) => { return fail(message); },
+        }
+    }
+
+    safe {
+        if (opts.repeat) {
+            # At least one line: an empty input and -n 0 returned above.
+            var written = 0;
+            do {
+                out.line(if (size == 1 and range_size == 0) { lines[0] } else { repeat_pick(edits: sampler, lines, opts.range_lo, range_size) });
+                written += 1;
+            } while (opts.head_count < 0 or written < opts.head_count);
+        } else {
+            let chosen = if (range_size > 0) {
+                select_numbers(opts.range_lo, opts.range_hi, opts.head_count, edits: sampler)
+            } else {
+                select_lines(lines, opts.head_count, edits: sampler)
+            };
+            for (line in chosen) {
+                out.line(line);
+            }
+        }
+        out.flush();
+    }
+    return EXIT_OK;
+}

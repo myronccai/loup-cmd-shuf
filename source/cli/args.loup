@@ -1,44 +1,240 @@
 @mode(host.dual)
 
-# Command-line parsing. Loup 1.26 has no CLI library, so arguments are
-# parsed by hand into an Options value.
+# Command-line parsing for shuf, following GNU getopt_long and GNU shuf:
 #
-# Grammar: [OPTIONS] COMMAND [OPERANDS...]
-#   Options may appear anywhere before `--`; everything after `--` is an
-#   operand. Value options accept `--name VALUE` and `--name=VALUE`.
+# - options and operands may be mixed; `--` ends the options and `-` alone
+#   is an operand (standard input);
+# - short options cluster (`-rz`), and one that takes a value takes the
+#   rest of its word or the next argument (`-n3`, `-n 3`);
+# - long options take `--name=VALUE` or `--name VALUE` and may be shortened
+#   to any unambiguous prefix (`--head=2`);
+# - each option is checked as it is read, so the first error wins; checks
+#   that involve several options (-e with -i, extra operands) come last.
+#
+# Runtime: host.dual. Compiled into the native binary build/shuf by `make
+# build`; `loup run source/main.loup` interprets the same code.
+#
+# Structure: Options and ArgError; the option table; value parsers
+# (parse_count, parse_range, parse_seed); apply_option; parse_args; and
+# check_combination for the rules that span options.
 
-pub const DEFAULT_GREETING: string = "Hello";
-
-pub struct Options {
-    pub command: string;
-    pub operands: list[string];
-    pub help: bool;
-    pub version: bool;
-    pub verbose: bool;
-    pub shout: bool;
-    pub greeting: string;
+# The parsed command line. A class, not a struct: it crosses module
+# boundaries, which native builds get wrong for structs whose field names
+# another type shares.
+pub class Options {
+    pub var help: bool = false;
+    pub var version: bool = false;
+    pub var echo: bool = false;
+    # -i LO-HI. `range_hi` may be `range_lo - 1`: an empty range.
+    pub var has_range: bool = false;
+    pub var range_lo: int = 0;
+    pub var range_hi: int = 0;
+    # -n: the smallest count given, as GNU does with several; -1 for none.
+    pub var head_count: int = -1;
+    pub var output: string = "";
+    pub var has_output: bool = false;
+    pub var random_source: string = "";
+    # --seed, this program's extension; the clock seeds the generator when
+    # neither it nor --random-source is given.
+    pub var has_seed: bool = false;
+    pub var seed: int = 0;
+    pub var repeat: bool = false;
+    pub var zero: bool = false;
+    pub var operands: list[string] = [];
 }
 
-pub func parse_args(argv: list[string]): Result[Options, string] {
-    var command = "";
-    var operands: list[string] = [];
-    var help = false;
-    var version = false;
-    var verbose = false;
-    var shout = false;
-    var greeting = DEFAULT_GREETING;
-    var only_operands = false;
+# A command-line error: the message without the `shuf: ` prefix, and
+# whether the `Try 'shuf --help'` line follows it (getopt errors and option
+# conflicts, not bad values).
+pub class ArgError {
+    pub let message: string;
+    pub let try_help: bool;
 
+    new(message: string, try_help: bool) {
+        this.message = message;
+        this.try_help = try_help;
+    }
+}
+
+# Most command-line errors are followed by the Try line; bad option values
+# are not, and say so by name: `usage_error(msg, try_help = false)`. Named
+# arguments are kept to calls inside this module: across modules the native
+# build passes them wrongly.
+func usage_error(message: string, try_help: bool = true): ArgError {
+    return ArgError(message, try_help);
+}
+
+# The long options in GNU's order (ambiguity lists follow it), and whether
+# each takes a value. --seed is this program's own.
+func long_names(): list[string] {
+    return ["echo", "input-range", "head-count", "output", "random-source", "repeat",
+        "zero-terminated", "seed", "help", "version"];
+}
+
+func takes_value(name: string): bool {
+    return ["input-range", "head-count", "output", "random-source", "seed"].contains(name);
+}
+
+func long_for_short(letter: string): string {
+    return match letter {
+        "e" => "echo",
+        "i" => "input-range",
+        "n" => "head-count",
+        "o" => "output",
+        "r" => "repeat",
+        "z" => "zero-terminated",
+        _ => "",
+    };
+}
+
+# The long option a word names: an exact name or a unique prefix. Returns
+# the name, or an ArgError for an unknown or ambiguous one.
+func resolve_long(given: string): Result[string, ArgError] {
+    let names = long_names();
+    if (names.contains(given)) {
+        return Ok(given);
+    }
+    var matches: list[string] = [];
+    for (name in names) {
+        if (name.startsWith(given)) {
+            matches.push(name);
+        }
+    }
+    if (matches.len() == 1) {
+        return Ok(matches[0]);
+    }
+    if (matches.len() == 0) {
+        return Err(usage_error(i"unrecognized option '--{$ given $}'"));
+    }
+    var listed: list[string] = [];
+    for (name in matches) {
+        listed.push("'--" + name + "'");
+    }
+    return Err(usage_error(i"option '--{$ given $}' is ambiguous; possibilities: " + listed.join(" ")));
+}
+
+# Digits only, at most 18 of them (no overflow), as a number; None otherwise.
+pub func parse_number(text: string): int? {
+    if (text.len() == 0 or text.len() > 18) {
+        return None;
+    }
+    var value = 0;
+    for (ch in text) {
+        let digit = "0123456789".index_of(ch);
+        if (digit < 0) {
+            return None;
+        }
+        value = value * 10 + digit;
+    }
+    return Some(value);
+}
+
+# A -n COUNT. Longer digit strings than parse_number takes still count:
+# they ask for more lines than any input has.
+pub func parse_count(text: string): int? {
+    var digits = true;
+    for (ch in text) {
+        digits = digits and "0123456789".contains(ch);
+    }
+    if (text.len() > 18 and digits) {
+        return Some(999999999999999999);
+    }
+    return parse_number(text);
+}
+
+# A -i LO-HI range as (LO, HI); HI may be one less than LO (no numbers).
+pub func parse_range(text: string): (int, int)? {
+    let dash = text.index_of("-");
+    if (dash < 1) {
+        return None;
+    }
+    let lo = parse_number(text.slice(0, dash)) ?? -1;
+    let hi = parse_number(text.slice(dash + 1)) ?? -1;
+    if (lo < 0 or hi < 0 or lo > hi + 1) {
+        return None;
+    }
+    return Some((lo, hi));
+}
+
+# Stores one option in `o`. Returns "" or the message of a bad value.
+safe func apply_option(edits o: Options, name: string, value: string): string {
+    if (name == "echo") {
+        o.echo = true;
+    } else if (name == "input-range") {
+        if (o.has_range) {
+            return "multiple -i options specified";
+        }
+        match parse_range(value) {
+            Some((lo, hi)) => {
+                o.has_range = true;
+                o.range_lo = lo;
+                o.range_hi = hi;
+            },
+            None => { return i"invalid input range: '{$ value $}'"; },
+        }
+    } else if (name == "head-count") {
+        let count = parse_count(value) ?? -1;
+        if (count < 0) {
+            return i"invalid line count: '{$ value $}'";
+        }
+        if (o.head_count < 0 or count < o.head_count) {
+            o.head_count = count;
+        }
+    } else if (name == "output") {
+        if (o.has_output) {
+            return "multiple output files specified";
+        }
+        o.output = value;
+        o.has_output = true;
+    } else if (name == "random-source" or name == "seed") {
+        if (o.random_source != "" or o.has_seed) {
+            return "multiple random sources specified";
+        }
+        if (name == "random-source") {
+            o.random_source = value;
+        } else {
+            o.seed = parse_number(value) ?? -1;
+            o.has_seed = o.seed >= 0;
+            if (!o.has_seed) {
+                return i"invalid seed: '{$ value $}'";
+            }
+        }
+    } else if (name == "repeat") {
+        o.repeat = true;
+    } else if (name == "zero-terminated") {
+        o.zero = true;
+    } else if (name == "help") {
+        o.help = true;
+    } else if (name == "version") {
+        o.version = true;
+    }
+    return "";
+}
+
+# The rules that span options, checked once all are read.
+func check_combination(o: Options): ArgError? {
+    if (o.echo and o.has_range) {
+        return Some(usage_error("cannot combine -e and -i options"));
+    }
+    if (o.has_range and o.operands.len() > 0) {
+        return Some(usage_error(i"extra operand '{$ o.operands[0] $}'"));
+    }
+    if (!o.echo and !o.has_range and o.operands.len() > 1) {
+        return Some(usage_error(i"extra operand '{$ o.operands[1] $}'"));
+    }
+    return None;
+}
+
+pub func parse_args(argv: list[string]): Result[Options, ArgError] {
+    let o = Options();
+    var only_operands = false;
     var i = 0;
     while (i < argv.len()) {
         let arg = argv[i];
         i += 1;
-
         if (only_operands or arg == "-" or !arg.startsWith("-")) {
-            if (command.is_empty()) {
-                command = arg;
-            } else {
-                operands.push(arg);
+            safe {
+                o.operands.push(arg);
             }
             continue;
         }
@@ -46,53 +242,63 @@ pub func parse_args(argv: list[string]): Result[Options, string] {
             only_operands = true;
             continue;
         }
-
-        # Split `--name=value` into its name and inline value.
-        var name = arg;
-        var inline_value: Option[string] = None;
-        if (arg.startsWith("--") and arg.contains("=")) {
-            let parts = arg.split("=");
-            name = parts[0];
-            inline_value = Some(parts.slice(1).join("="));
-        }
-
-        if (name == "-g" or name == "--greeting") {
-            match inline_value {
-                Some(v) => { greeting = v; },
-                None => {
-                    if (i >= argv.len()) {
-                        return Err(i"option '{$ name $}' requires a value");
-                    }
-                    greeting = argv[i];
-                    i += 1;
-                },
+        var problem = "";
+        if (arg.startsWith("--")) {
+            let eq = arg.index_of("=");
+            let given = if (eq < 0) { arg.slice(2) } else { arg.slice(2, eq) };
+            let name = resolve_long(given)?;
+            var value = "";
+            if (eq >= 0 and !takes_value(name)) {
+                return Err(usage_error(i"option '--{$ name $}' doesn't allow an argument"));
             }
-            continue;
-        }
-
-        if (inline_value.is_some()) {
-            return Err(i"option '{$ name $}' does not take a value");
-        }
-        if (name == "-h" or name == "--help") {
-            help = true;
-        } else if (name == "-V" or name == "--version") {
-            version = true;
-        } else if (name == "-v" or name == "--verbose") {
-            verbose = true;
-        } else if (name == "--shout") {
-            shout = true;
+            if (eq >= 0) {
+                value = arg.slice(eq + 1);
+            } else if (takes_value(name)) {
+                if (i >= argv.len()) {
+                    return Err(usage_error(i"option '--{$ name $}' requires an argument"));
+                }
+                value = argv[i];
+                i += 1;
+            }
+            safe {
+                problem = apply_option(edits: o, name, value);
+            }
         } else {
-            return Err(i"unknown option '{$ name $}'");
+            # A cluster of short options; one that takes a value ends it.
+            var k = 1;
+            while (k < arg.len() and problem == "") {
+                let letter = arg.slice(k, k + 1);
+                let name = long_for_short(letter);
+                k += 1;
+                if (name == "") {
+                    return Err(usage_error(i"invalid option -- '{$ letter $}'"));
+                }
+                var value = "";
+                if (takes_value(name)) {
+                    if (k < arg.len()) {
+                        value = arg.slice(k);
+                    } else if (i < argv.len()) {
+                        value = argv[i];
+                        i += 1;
+                    } else {
+                        return Err(usage_error(i"option requires an argument -- '{$ letter $}'"));
+                    }
+                    k = arg.len();
+                }
+                safe {
+                    problem = apply_option(edits: o, name, value);
+                }
+            }
+        }
+        if (problem != "") {
+            return Err(usage_error(problem, try_help = false));
         }
     }
-
-    return Ok(Options(
-        command = command,
-        operands = operands,
-        help = help,
-        version = version,
-        verbose = verbose,
-        shout = shout,
-        greeting = greeting,
-    ));
+    if (o.help or o.version) {
+        return Ok(o);
+    }
+    match check_combination(o) {
+        Some(e) => { return Err(e); },
+        None => { return Ok(o); },
+    }
 }

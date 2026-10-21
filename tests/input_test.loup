@@ -1,0 +1,59 @@
+@mode(host.dual)
+
+# Unit tests for shuf's input and seeds (commands/lines.loup and
+# commands/seed.loup): line splitting, -z, listed ranges, input errors, and
+# seeds from bytes and random-source files.
+#
+# Runtime: host.dual, run by the test runner: `make test` interprets this
+# file with `loup-bootstrap test --no-parallel` (LOUPPATH=source), one test
+# per `func test_*()`. It writes small files under build/tmp/ (the Makefile
+# creates it) and reads /dev/zero and /dev/null through `head`. It is not
+# part of the binary.
+
+from debug.assert import (expect, expectEq);
+from io.fs import (writeText);
+from commands.lines import (delimiter, split_lines, read_input, range_lines);
+from commands.seed import (seed_from_bytes, check_random_source, random_source_seed);
+
+func test_split_lines(): void {
+    expectEq(split_lines("a\nb\n", "\n").join("|"), "a|b", "final newline");
+    expectEq(split_lines("a\nb", "\n").join("|"), "a|b", "no final newline");
+    expectEq(split_lines("a\n\nb\n", "\n").join("|"), "a||b", "an empty line is a line");
+    expectEq(split_lines("\n", "\n").len(), 1, "one empty line");
+    expectEq(split_lines("", "\n").len(), 0, "no input");
+    let nul = delimiter(true);
+    expectEq(split_lines("a b" + nul + "c\nd" + nul, nul).join("|"), "a b|c\nd", "-z keeps newlines in lines");
+    expectEq(delimiter(false), "\n", "newline by default");
+}
+
+func test_range_lines(): void {
+    expectEq(range_lines(8, 12).join(","), "8,9,10,11,12", "inclusive");
+    expectEq(range_lines(5, 4).len(), 0, "empty range");
+    expectEq(range_lines(0, 0).join(","), "0", "one number");
+}
+
+func test_read_input(): void {
+    writeText("build/tmp/input.txt", "x\ny\n");
+    match read_input("build/tmp/input.txt") {
+        Ok(text) => { expectEq(text, "x\ny\n", "read"); },
+        Err(message) => { expect(false, message); },
+    }
+    expectEq(read_input("build/tmp/nope").unwrap_err(), "build/tmp/nope: No such file or directory", "missing");
+    expectEq(read_input("build").unwrap_err(), "read error: Is a directory", "directory");
+}
+
+func test_seed_from_bytes_is_fnv1a(): void {
+    expectEq(seed_from_bytes([]), -3750763034362895579, "the offset basis");
+    expectEq(seed_from_bytes([97]), -5808556873153909620, "FNV-1a of 'a'");
+    expectEq(seed_from_bytes([102, 111, 111, 98, 97, 114]), -8821353812377114648, "of 'foobar'");
+}
+
+func test_random_source_seed(): void {
+    writeText("build/tmp/bytes.bin", "foobar");
+    expectEq(random_source_seed("build/tmp/bytes.bin").unwrap(), -8821353812377114648, "a file's bytes");
+    expectEq(random_source_seed("/dev/zero").unwrap(), random_source_seed("/dev/zero").unwrap(), "same bytes, same seed");
+    expectEq(random_source_seed("/dev/null").unwrap_err(), "'/dev/null': end of file", "no bytes");
+    expectEq(random_source_seed("build").unwrap_err(), "build: read error: Is a directory", "a directory");
+    expectEq(check_random_source("build/tmp/none"), "build/tmp/none: No such file or directory", "missing");
+    expectEq(check_random_source("/dev/zero"), "", "present");
+}
